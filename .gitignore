@@ -1,0 +1,5 @@
+synthetic_mboxes/
+__pycache__/
+*.py[codz]
+*$py.class
+venv/
