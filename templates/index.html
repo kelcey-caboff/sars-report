@@ -1,0 +1,263 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Bare-bones SARs Sifter</title>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bulma@0.9.4/css/bulma.min.css">
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body class="section">
+  <div class="container">
+    <h1 class="title">Bare-bones SARs Sifter</h1>
+    <p class="subtitle">Upload a file → get text & metadata</p>
+
+    <form id="uploadForm" class="box">
+      <div class="field">
+        <div class="file has-name is-fullwidth">
+          <label class="file-label">
+            <input class="file-input" type="file" name="files" id="fileInput" multiple required>
+            <span class="file-cta">
+              <span class="file-icon">📄</span>
+              <span class="file-label">Choose a file…</span>
+            </span>
+            <span class="file-name" id="fileName">No files selected</span>
+          </label>
+        </div>
+      </div>
+      <div class="field is-grouped">
+        <div class="control">
+          <button class="button is-link" type="submit">Upload</button>
+        </div>
+        <div class="control">
+          <button class="button is-light" type="button" id="resetBtn">Reset</button>
+        </div>
+      </div>
+      <p id="status" class="help"></p>
+    </form>
+
+    <div id="results" class="content">
+      <h2 class="title is-5">Current files</h2>
+      <p class="is-size-7 has-text-grey">Looking in: <code>{{ ("/" ~ '') and '' }}</code></p>
+      {% if existing %}
+        <ul>
+          {% for it in existing %}
+            <li>{{ it.label }}</li>
+          {% endfor %}
+        </ul>
+      {% else %}
+        <p>No files yet.</p>
+      {% endif %}
+    </div>
+    <div id="indexing" class="box">
+      <h2 class="title is-5">Indexing</h2>
+      <div class="buttons">
+        <button class="button is-primary" id="startIndexBtn">Start indexing</button>
+      </div>
+      <p id="indexStatus" class="help">Idle.</p>
+    </div>
+
+    <div id="clustersBox" class="box" style="display:none;">
+      <h2 class="title is-5">Identity clusters</h2>
+      <div class="field">
+        <div class="control">
+          <div class="select">
+            <select id="clusterSelect"></select>
+          </div>
+        </div>
+      </div>
+      <div id="clusterResults" class="content"></div>
+    </div>
+  </div>
+
+<script>
+const fileInput = document.getElementById('fileInput');
+const fileName  = document.getElementById('fileName');
+const form      = document.getElementById('uploadForm');
+const statusEl  = document.getElementById('status');
+const results   = document.getElementById('results');
+const resetBtn  = document.getElementById('resetBtn');
+
+function escapeHtml(s) {
+  if (s == null) return '';
+  return String(s)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+fileInput.addEventListener('change', () => {
+  if (!fileInput.files.length) {
+    fileName.textContent = 'No files selected';
+  } else if (fileInput.files.length === 1) {
+    fileName.textContent = fileInput.files[0].name;
+  } else {
+    fileName.textContent = `${fileInput.files.length} files selected`;
+  }
+});
+
+resetBtn.addEventListener('click', () => {
+  form.reset();
+  fileName.textContent = 'No files selected';
+  statusEl.textContent = '';
+  results.classList.add('is-hidden');
+});
+
+form.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  if (!fileInput.files.length) return;
+  results.classList.add('is-hidden');
+  statusEl.textContent = 'Uploading…';
+
+  const fd = new FormData();
+  for (const f of fileInput.files) {
+    fd.append('files', f);
+  }
+
+  try {
+    const up = await fetch('/upload', { method: 'POST', body: fd });
+    if (!up.ok) {
+      const errText = await up.text();
+      throw new Error(`Upload failed: ${up.status} ${errText}`);
+    }
+    //const data = await up.json();
+
+
+    statusEl.textContent = 'Done.';
+    window.location = '/';
+
+    results.classList.remove('is-hidden');
+  } catch (err) {
+    statusEl.textContent = err.message || String(err);
+    window.location = '/';
+  }
+});
+
+const startIndexBtn = document.getElementById('startIndexBtn');
+const indexStatus  = document.getElementById('indexStatus');
+let pollTimer = null;
+
+const clustersBox = document.getElementById('clustersBox');
+const clusterSelect = document.getElementById('clusterSelect');
+const clusterResults = document.getElementById('clusterResults');
+let currentJobId = null;
+let clustersCache = [];
+
+async function pollStatus(jobId) {
+  try {
+    const res = await fetch(`/index/status?job_id=${encodeURIComponent(jobId)}`);
+    if (!res.ok) {
+      indexStatus.textContent = `Status check failed: ${res.status}`;
+      clearInterval(pollTimer);
+      startIndexBtn.disabled = false;
+      return;
+    }
+    const data = await res.json();
+    if (data.status === 'running') {
+      const p = data.progress || { processed: 0, total: 0 };
+      indexStatus.textContent = `Indexing… ${p.processed}/${p.total}`;
+    } else if (data.status === 'done') {
+      const p = data.progress || { processed: 0, total: 0 };
+      indexStatus.textContent = `Indexing complete. Processed ${p.processed} file(s).`;
+      clearInterval(pollTimer);
+      startIndexBtn.disabled = false;
+      currentJobId = jobId;
+      loadClusters(jobId);
+    } else if (data.status === 'error') {
+      indexStatus.textContent = `Indexing error: ${data.error || 'Unknown error'}`;
+      clearInterval(pollTimer);
+      startIndexBtn.disabled = false;
+    } else {
+      indexStatus.textContent = `Status: ${data.status}`;
+    }
+  } catch (e) {
+    indexStatus.textContent = `Status error: ${e.message || e}`;
+    clearInterval(pollTimer);
+    startIndexBtn.disabled = false;
+  }
+}
+
+startIndexBtn?.addEventListener('click', async () => {
+  startIndexBtn.disabled = true;
+  indexStatus.textContent = 'Starting…';
+  try {
+    const res = await fetch('/index/start', { method: 'POST' });
+    if (!res.ok) {
+      const t = await res.text();
+      throw new Error(`Start failed: ${res.status} ${t}`);
+    }
+    const data = await res.json();
+    const jobId = data.job_id;
+    indexStatus.textContent = `Job ${jobId} started…`;
+    if (pollTimer) clearInterval(pollTimer);
+    pollTimer = setInterval(() => pollStatus(jobId), 500);
+  } catch (e) {
+    indexStatus.textContent = e.message || String(e);
+    startIndexBtn.disabled = false;
+  }
+});
+
+async function loadClusters(jobId) {
+  try {
+    const res = await fetch(`/index/result?job_id=${encodeURIComponent(jobId)}`);
+    if (!res.ok) return;
+    const data = await res.json();
+    const clusters = data.clusters || [];
+    if (!clusters.length) return;
+    clustersCache = clusters;
+    clustersBox.style.display = '';
+    clusterSelect.innerHTML = '';
+    for (const c of clusters) {
+      const opt = document.createElement('option');
+      const count = Number.isFinite(c.size)
+        ? c.size
+        : (Array.isArray(c.members) ? c.members.length : 0);
+      opt.value = c.id;
+      opt.textContent = `${c.label || c.id}`;
+      clusterSelect.appendChild(opt);
+    }
+    if (clusterSelect.value) {
+      showCluster(jobId, clusterSelect.value);
+    }
+  } catch (e) {
+    console.error(e);
+  }
+}
+
+async function showCluster(jobId, clusterId) {
+  if (!clusterId) return;
+  const res = await fetch(`/index/cluster?job_id=${encodeURIComponent(jobId)}&cluster_id=${encodeURIComponent(clusterId)}`);
+  if (!res.ok) {
+    clusterResults.textContent = 'Failed to load cluster.';
+    return;
+  }
+  const data = await res.json();
+  const posts = data.postings || [];
+  const frag = document.createDocumentFragment();
+  for (const p of posts) {
+    const box = document.createElement('div');
+    box.className = 'box';
+    const from = p.from || '';
+    const to = p.to || '';
+    const subj = p.subject || '(no subject)';
+    const date = p.date || '';
+    const body = p.body || '';
+    box.innerHTML = `
+      <p><strong>FROM:</strong> ${escapeHtml(from)}</p>
+      <p><strong>TO:</strong> ${escapeHtml(to)}</p>
+      <p><strong>SUBJECT:</strong> ${escapeHtml(subj)}</p>
+      <p><strong>DATE:</strong> ${escapeHtml(date)}</p>
+      <div class="content"><pre>${escapeHtml(body)}</pre></div>
+    `;
+    frag.appendChild(box);
+  }
+  clusterResults.innerHTML = '';
+  clusterResults.appendChild(frag);
+}
+
+clusterSelect?.addEventListener('change', () => showCluster(currentJobId, clusterSelect.value));
+</script>
+</body>
+</html>

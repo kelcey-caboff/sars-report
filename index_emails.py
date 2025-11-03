@@ -1,9 +1,8 @@
 import asyncio
 import re
 import hashlib
-import spacy
 from email.utils import getaddresses
-
+import json
 from pathlib import Path
 from typing import List, Dict, Any, Iterable, Optional, Union
 from collections import defaultdict
@@ -11,6 +10,18 @@ from process_email import iter_message_bytes, run_mbox
 from cluster_names import IdentityClusteringModel
 
 EMAIL_RX = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+
+_DEF_MODEL = "en_core_web_trf"
+
+
+def _load_nlp(model_name: str):
+    import spacy as _sp
+    try:
+        return _sp.load(model_name)
+    except Exception as e:
+        raise ImportError(
+            f"spaCy model '{model_name}' could not be loaded. Ensure spaCy and the model are installed in the SAME environment running uvicorn. Original error: {e}"
+        )
 
 
 class MboxIndex:
@@ -42,7 +53,7 @@ class MboxIndex:
         self.identifiers: set[str] = set()
 
         # Heavy load once
-        self._nlp = spacy.load(spacy_model)
+        self._nlp = _load_nlp(spacy_model or _DEF_MODEL)
 
         # 1) Parse all mbox files into self.parts
         for mbox_path in paths:
@@ -265,6 +276,72 @@ class MboxIndex:
         if cluster_id not in self.cluster_index:
             return []
         return [o["part_id"] for o in self.cluster_index[cluster_id]["postings"]]
+
+
+def run_index_to_dir(
+    mbox_paths,
+    out_dir: Path | str,
+    *,
+    model_path: str | Path = "name_cluster.model",
+    threshold: float = 0.95,
+    tika_url: str = "http://localhost:9998",
+    spacy_model: str = "en_core_web_trf",
+) -> dict:
+    """
+    Build an index from one or more .mbox files and write machine-readable
+    artifacts to `out_dir` for use by the web app. Returns a small summary dict.
+    Artifacts written:
+      - clusters.json              (list of clusters w/ optional members)
+      - cluster_index.json         (mapping cluster_id -> {label, members, postings})
+      - id_to_cluster.json         (mapping identifier -> cluster_id)
+    """
+    paths = list(mbox_paths) if isinstance(mbox_paths, (list, tuple)) else [mbox_paths]
+    out = Path(out_dir)
+    out.mkdir(parents=True, exist_ok=True)
+
+    idx = MboxIndex(
+        paths,
+        model_path=model_path,
+        threshold=threshold,
+        tika_url=tika_url,
+        spacy_model=spacy_model,
+    )
+
+    # Write outputs
+    (out / "clusters.json").write_text(
+        json.dumps(idx.list_clusters(include_members=True), indent=2), encoding="utf-8"
+    )
+    (out / "cluster_index.json").write_text(
+        json.dumps(idx.cluster_index, indent=2), encoding="utf-8"
+    )
+    (out / "id_to_cluster.json").write_text(
+        json.dumps(idx.id_to_cluster, indent=2), encoding="utf-8"
+    )
+
+    # Write a compact parts file for UI rendering
+    parts_out = {}
+    for pid, doc in idx.parts.items():
+        try:
+            from_disp = idx._render_person(doc.get("from")) if doc.get("from") is not None else None
+            to_disp = idx._render_recipients(doc)
+        except Exception:
+            from_disp, to_disp = doc.get("from"), doc.get("to")
+        parts_out[pid] = {
+            "From": from_disp,
+            "To": to_disp,
+            "Subject": doc.get("subject"),
+            "Date": doc.get("date"),
+            "Body": (doc.get("body") or doc.get("text") or doc.get("content") or doc.get("payload") or ""),
+        }
+    (out / "parts.json").write_text(
+        json.dumps(parts_out, indent=2), encoding="utf-8"
+    )
+
+    return {
+        "clusters": len(idx.cluster_index),
+        "identifiers": len(idx.identifiers),
+        "parts": len(idx.parts),
+    }
 
 
 if __name__ == "__main__":
