@@ -35,9 +35,9 @@ class MboxIndex:
     def __init__(
         self,
         mbox_paths: Union[str, Path, Iterable[Union[str, Path]]],
-        *,
+        *,  # The rest are defaulted, so need explicit calling by keyword
         model_path: Union[str, Path] = "name_cluster.model",
-        threshold: float = 0.95,
+        threshold: float = 0.65,
         tika_url: str = "http://localhost:9998",
         spacy_model: str = "en_core_web_trf",
     ) -> None:
@@ -57,8 +57,13 @@ class MboxIndex:
 
         # 1) Parse all mbox files into self.parts
         for mbox_path in paths:
-            for msg_bytes in iter_message_bytes(str(mbox_path)):
-                mail_boxes = asyncio.run(run_mbox(msg_bytes, str(mbox_path), tika_url))
+            msgs = list(iter_message_bytes(str(mbox_path)))
+
+            async def parse_all():
+                tasks = [run_mbox(b, str(mbox_path), tika_url) for b in msgs]
+                return await asyncio.gather(*tasks)
+
+            for mail_boxes in asyncio.run(parse_all()):
                 for k, v in mail_boxes.items():
                     self.parts[k] = v
 
@@ -283,7 +288,7 @@ def run_index_to_dir(
     out_dir: Path | str,
     *,
     model_path: str | Path = "name_cluster.model",
-    threshold: float = 0.95,
+    threshold: float = 0.65,
     tika_url: str = "http://localhost:9998",
     spacy_model: str = "en_core_web_trf",
 ) -> dict:

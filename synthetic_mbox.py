@@ -124,16 +124,16 @@ def maybe_add_name_mentions(
 def mk_people() -> list[dict]:
     # 10 deterministic-ish people
     seeds = [
-        ("Alice Johnson", "alice.johnson"),
-        ("Bob Singh", "bob.singh"),
-        ("Carol Kim", "carol.kim"),
-        ("Dan O'Neill", "dan.oneill"),
-        ("Eve Martin", "eve.martin"),
-        ("Frank Li", "frank.li"),
+        ("Ada Lovelace", "ada.lovelace"),
         ("Grace Hopper", "grace.hopper"),
-        ("Hector Ruiz", "hector.ruiz"),
-        ("Ivy Chen", "ivy.chen"),
-        ("Jules Verne", "jules.verne"),
+        ("Alan Turing", "a.turing"),
+        ("John von Neumann", "jvn"),
+        ("Hedy Lamarr", "hedy.lamarr"),
+        ("Donald Knuth", "donald.knuth"),
+        ("Ray Kurzweil", "ray.kurzweil"),
+        ("Linus Torvalds", "linus.torvalds"),
+        ("Guido van Rossum", "guido.van.rossum"),
+        ("Moxie Marlinspike", "marlinspike")
     ]
     domains = ["example.org", "example.com"]
     people = []

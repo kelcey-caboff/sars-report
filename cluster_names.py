@@ -59,7 +59,12 @@ class IdentityClusteringModel:
         s = s.strip().lower()
         if "@" not in s:
             return "", ""
-        local, domain = s.split("@", 1)
+        # Maybe a twitter-like handle?
+        elif s[0] == "@":
+            domain = ""
+            local = s[1:]
+        else:
+            local, domain = s.split("@", 1)
         return local, domain
 
     def _parse_name(self, s: str) -> Dict[str, str]:
@@ -312,10 +317,6 @@ class IdentityClusteringModel:
                 cleaned_strings.append(s)
         strings = cleaned_strings
 
-        pairs = self._candidate_pairs(strings)
-        if not pairs:
-            return [[s] for s in strings]
-
         # Score & build graph
         adj: Dict[int, List[int]] = defaultdict(list)
 
@@ -343,6 +344,10 @@ class IdentityClusteringModel:
                 add_item(s)
 
         strings = expanded
+
+        pairs = self._candidate_pairs(strings)
+        if not pairs and not forced_edges:
+            return [[s] for s in strings]
 
         # Add forced edges from expanded headers
         for i_forced, j_forced in forced_edges:

@@ -2,14 +2,18 @@ from fastapi import FastAPI, File, UploadFile, HTTPException, Request, Backgroun
 from fastapi.responses import PlainTextResponse, JSONResponse, HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+from fastapi.middleware.cors import CORSMiddleware
 from pathlib import Path
-from typing import List
+from typing import List, Optional
 import httpx
 import os
 import json
 import uuid
 import sys
 from datetime import datetime
+import re
+from email.utils import parsedate_to_datetime
+from pydantic import BaseModel, Field
 
 TIKA_URL = "http://localhost:9998/"
 DATA_DIR = Path(os.getenv("DATA_DIR", "data"))
@@ -22,11 +26,113 @@ app = FastAPI(title="Bare-bones SARs Sifter", version="0.1.0")
 app.mount("/static", StaticFiles(directory="static"), name="static")
 templates = Jinja2Templates(directory="templates")
 
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Basic upload limits and helpers
+MAX_UPLOAD_BYTES = int(os.getenv("MAX_UPLOAD_BYTES", "104857600"))  # 100 MiB default
+CHUNK_SIZE = 1024 * 1024  # 1 MiB
+
+_uuid_re = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
+_ext_re = re.compile(r"\.[a-z0-9]{1,8}$")
+
+def _safe_ext(ext: str) -> str:
+    try:
+        ext = (ext or "").lower()
+        return ext if _ext_re.match(ext) else ""
+    except Exception:
+        return ""
+
+
+def _looks_like_uuid(s: str) -> bool:
+    return bool(_uuid_re.match(s or ""))
+
+
+async def _stream_save_upload(file: UploadFile, dest: Path, max_bytes: int = MAX_UPLOAD_BYTES) -> int:
+    """Stream an UploadFile to disk in chunks, enforcing a soft size limit.
+    Returns the number of bytes written. Raises HTTPException on limit breach.
+    """
+    total = 0
+    with dest.open("wb") as f:
+        while True:
+            chunk = await file.read(CHUNK_SIZE)  # type: ignore
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > max_bytes:
+                # Stop early and remove partial file
+                try:
+                    f.flush()
+                finally:
+                    dest.unlink(missing_ok=True)
+                raise HTTPException(status_code=413, detail="Uploaded file too large")
+            f.write(chunk)
+    # Reset cursor so future reads (if any) start from beginning
+    try:
+        await file.seek(0)  # type: ignore
+    except Exception:
+        pass
+    return total
+
 
 def _write_json(path: Path, obj: dict):
     tmp = path.with_suffix(path.suffix + ".tmp")
     tmp.write_text(json.dumps(obj, indent=2), encoding="utf-8")
     tmp.replace(path)
+
+
+def _job_dir(job_id: str) -> Path:
+    return INDEX_JOBS_DIR / job_id
+
+
+def _load_cluster_artifacts(job_id: str) -> tuple[dict, dict, dict]:
+    """
+    Return (cluster_index, id_to_cluster, identifiter_postings) for a job
+    """
+    base = _job_dir(job_id)
+    ci = json.loads((base / "cluster_index.json").read_text(encoding="utf-8"))
+    itc = json.loads((base / "id_to_cluster.json").read_text(encoding="utf-8"))
+    id_posts = json.loads((base / "identifier_postings.json").read_text(encoding="utf-8"))
+    return ci, itc, id_posts
+
+
+def _save_cluster_artifacts(job_id: str, cluster_index: dict, id_to_cluster: dict):
+    base = _job_dir(job_id)
+    # Rebuild clusters.json from cluster_index
+    clusters = []
+    for cid, data in cluster_index.items():
+        clusters.append({
+            "id": cid,
+            "label": data.get("label"),
+            "size": len(data.get("members", [])),
+            "members": list(data.get("members", [])),
+        })
+    clusters.sort(key=lambda r: (-r["size"], r.get("label") or ""))
+    (base / "clusters.json").write_text(json.dumps(clusters, indent=2), encoding="utf-8")
+    (base / "cluster_index.json").write_text(json.dumps(cluster_index, indent=2), encoding="utf-8")
+    (base / "id_to_cluster.json").write_text(json.dumps(id_to_cluster, indent=2), encoding="utf-8")
+
+
+def _recompute_cluster_postings(cluster_index: dict, identifier_postings: dict, cid: str):
+    """
+    Rebuild postings for a cluster by unioning postings from its members
+    """
+    members = cluster_index.get(cid, {}).get("members", []) or []
+    merged: list[dict] = []
+    seen = set()
+    for ident in members:
+        for post in identifier_postings.get(ident, []):
+            key = (post.get("part_id"), post.get("role"))
+            if key in seen:
+                continue
+            seen.add(key)
+            merged.append({"part_id": post.get("part_id"), "role": post.get("role")})
+    cluster_index[cid]["postings"] = merged
 
 
 def run_index_job(job_id: str):
@@ -62,13 +168,21 @@ def run_index_job(job_id: str):
                 meta = json.loads(meta_path.read_text(encoding="utf-8"))
             except Exception:
                 continue
-            stored = meta.get("stored_name") or ""
-            if not stored.lower().endswith(".mbox"):
+            stored = (meta.get("stored_name") or "").strip()
+            # Ensure the stored name looks like our UUID + extension and lives in DATA_DIR
+            try:
+                stored_path = DATA_DIR / Path(stored).name
+            except Exception:
+                continue
+            stem = Path(stored).stem
+            if not (_looks_like_uuid(stem) and stored_path.suffix.lower() == ".mbox"):
+                continue
+            if not stored_path.exists():
                 continue
             items.append({
-                "id": meta.get("id") or meta_path.stem,
+                "id": (meta.get("id") or meta_path.stem),
                 "original_name": meta.get("original_name"),
-                "stored_name": stored,
+                "stored_name": stored_path.name,
             })
 
         total = len(items)
@@ -137,6 +251,7 @@ async def index_result(job_id: str = Query(...)):
     return {"clusters": data}
 
 
+
 @app.get("/index/cluster", response_class=JSONResponse)
 async def index_cluster(job_id: str = Query(...), cluster_id: str = Query(...)):
     out_dir = INDEX_JOBS_DIR / job_id
@@ -191,8 +306,19 @@ async def index_cluster(job_id: str = Query(...), cluster_id: str = Query(...)):
         }
         norm.append(item)
 
-    # Oldest -> newest
-    norm.sort(key=lambda x: x.get("date") or "")
+    # Oldest -> newest using parsed dates when possible
+    def _dt_key(rec):
+        d = rec.get("date")
+        try:
+            if not d:
+                return 0
+            dt = parsedate_to_datetime(d)
+            # Convert to POSIX seconds for stable sorting; handle naive vs aware
+            return int(dt.timestamp()) if dt else 0
+        except Exception:
+            return 0
+
+    norm.sort(key=_dt_key)
 
     return {"label": rec.get("label") or cluster_id, "postings": norm}
 
@@ -274,16 +400,26 @@ async def upload(files: List[UploadFile] = File(...)):
     saved = []
     try:
         for file in files:
-            content = await file.read()
-            if not content:
-                raise HTTPException(status_code=400, detail=f"Empty file: {file.filename}")
-
-            # Generate a UUID-based filename while preserving the original extension
+            # Generate a UUID-based filename while preserving a safe extension
             doc_id = str(uuid.uuid4())
-            _, ext = os.path.splitext(file.filename or "")
+            _, raw_ext = os.path.splitext(file.filename or "")
+            ext = _safe_ext(raw_ext)
             stored_name = f"{doc_id}{ext}"
             stored_path = DATA_DIR / stored_name
-            stored_path.write_bytes(content)
+
+            # Stream to disk to avoid loading whole file into memory
+            try:
+                bytes_written = await _stream_save_upload(file, stored_path)
+            except HTTPException:
+                # Re-raise known HTTP exceptions (e.g., 413)
+                raise
+            except Exception:
+                stored_path.unlink(missing_ok=True)
+                raise HTTPException(status_code=500, detail="Upload failed")
+
+            if bytes_written == 0:
+                stored_path.unlink(missing_ok=True)
+                raise HTTPException(status_code=400, detail=f"Empty file: {file.filename}")
 
             # Write a small sidecar with original name and other details
             meta = {
@@ -291,15 +427,18 @@ async def upload(files: List[UploadFile] = File(...)):
                 "original_name": file.filename,
                 "stored_name": stored_name,
                 "content_type": file.content_type,
-                "size": len(content),
+                "size": bytes_written,
             }
             (DATA_DIR / f"{doc_id}.meta.json").write_text(
                 json.dumps(meta, indent=2), encoding="utf-8"
             )
             saved.append(meta)
 
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    except HTTPException:
+        # Pass through specific HTTP errors
+        raise
+    except Exception:
+        raise HTTPException(status_code=500, detail="Upload failed")
 
     # Go back to index, which now lists cumulative uploads by original name
     return RedirectResponse(url="/", status_code=303)
