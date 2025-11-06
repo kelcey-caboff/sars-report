@@ -81,7 +81,10 @@ async def _stream_save_upload(file: UploadFile, dest: Path, max_bytes: int = MAX
 
 
 def _write_json(path: Path, obj: dict):
+    # Ensure parent directory exists before writing
+    path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.parent.mkdir(parents=True, exist_ok=True)
     tmp.write_text(json.dumps(obj, indent=2), encoding="utf-8")
     tmp.replace(path)
 
@@ -92,12 +95,20 @@ def _job_dir(job_id: str) -> Path:
 
 def _load_cluster_artifacts(job_id: str) -> tuple[dict, dict, dict]:
     """
-    Return (cluster_index, id_to_cluster, identifiter_postings) for a job
+    Return (cluster_index, id_to_cluster, identifier_postings) for a job.
+    Falls back to an empty dict for identifier_postings if that file is missing.
     """
     base = _job_dir(job_id)
     ci = json.loads((base / "cluster_index.json").read_text(encoding="utf-8"))
     itc = json.loads((base / "id_to_cluster.json").read_text(encoding="utf-8"))
-    id_posts = json.loads((base / "identifier_postings.json").read_text(encoding="utf-8"))
+    ip_path = base / "identifier_postings.json"
+    if ip_path.exists():
+        try:
+            id_posts = json.loads(ip_path.read_text(encoding="utf-8"))
+        except Exception:
+            id_posts = {}
+    else:
+        id_posts = {}
     return ci, itc, id_posts
 
 
@@ -120,19 +131,26 @@ def _save_cluster_artifacts(job_id: str, cluster_index: dict, id_to_cluster: dic
 
 def _recompute_cluster_postings(cluster_index: dict, identifier_postings: dict, cid: str):
     """
-    Rebuild postings for a cluster by unioning postings from its members
+    Rebuild postings for a cluster by unioning postings from its members.
+    If identifier_postings is missing/empty (older jobs), leave postings unchanged.
     """
-    members = cluster_index.get(cid, {}).get("members", []) or []
-    merged: list[dict] = []
-    seen = set()
-    for ident in members:
-        for post in identifier_postings.get(ident, []):
-            key = (post.get("part_id"), post.get("role"))
-            if key in seen:
-                continue
-            seen.add(key)
-            merged.append({"part_id": post.get("part_id"), "role": post.get("role")})
-    cluster_index[cid]["postings"] = merged
+    try:
+        if not identifier_postings:
+            return
+        members = cluster_index.get(cid, {}).get("members", []) or []
+        merged: list[dict] = []
+        seen = set()
+        for ident in members:
+            for post in identifier_postings.get(ident, []):
+                key = (post.get("part_id"), post.get("role"))
+                if key in seen:
+                    continue
+                seen.add(key)
+                merged.append({"part_id": post.get("part_id"), "role": post.get("role")})
+        cluster_index[cid]["postings"] = merged
+    except Exception:
+        # On any error, keep existing postings
+        pass
 
 
 def run_index_job(job_id: str):
@@ -250,6 +268,128 @@ async def index_result(job_id: str = Query(...)):
         raise HTTPException(status_code=500, detail="Could not read results")
     return {"clusters": data}
 
+
+@app.get("/index/identifiers", response_class=JSONResponse)
+async def index_identifiers(job_id: str = Query(...)):
+    base = _job_dir(job_id)
+    if not (base / "cluster_index.json").exists():
+        raise HTTPException(status_code=404, detail="No results for this job yet")
+    try:
+        cluster_index, id_to_cluster, _ = _load_cluster_artifacts(job_id)
+    except Exception:
+        raise HTTPException(status_code=500, detail="Could not load cluster artifacts")
+    
+    rows = []
+    label_by_cid = {cid: (data.get("label") or "") for cid, data in cluster_index.items()}
+    members_by_cid = {cid: set(data.get("members", [])) for cid, data in cluster_index.items()}
+
+    for ident, cid in id_to_cluster.items():
+        is_gold = ident == label_by_cid.get(cid)
+        rows.append({
+            "identifier": ident,
+            "cluster_id": cid,
+            "is_gold": is_gold,
+        })
+    
+    clusters = [
+        {"id": cid, "label": label_by_cid.get(cid, ""), "size": len(members_by_cid.get(cid, []))}
+        for cid in cluster_index.keys()
+    ]
+    clusters.sort(key=lambda r: (-r["size"], r.get("label") or ""))
+    return {"identifiers": rows, "clusters": clusters}
+
+
+class MoveModel(BaseModel):
+    identifier: str
+    target_cluster_id: str  # if unknown, a new cluster will be created
+
+
+class RelabelModel(BaseModel):
+    cluster_id: str
+    label: str
+
+
+class CreateModel(BaseModel):
+    label: Optional[str] = None
+    members: list[str] = Field(default_factory=list)
+
+
+class ClusterUpdate(BaseModel):
+    job_id: str
+    moves: list[MoveModel] = Field(default_factory=list)
+    relabels: list[RelabelModel] = Field(default_factory=list)
+    creates: list[CreateModel] = Field(default_factory=list)
+
+
+@app.post("/index/clusters/update", response_class=JSONResponse)
+async def index_clusters_update(payload: ClusterUpdate):
+    job_id = payload.job_id
+    base = _job_dir(job_id)
+    if not (base / "cluster_index.json").exists():
+        raise HTTPException(status_code=404, detail="No results for this job yet")
+    try:
+        cluster_index, id_to_cluster, identifier_postings = _load_cluster_artifacts(job_id)
+    except Exception:
+        raise HTTPException(status_code=500, detail="Could not load cluster artifacts")
+
+    import hashlib, time
+    def _new_cid(seed: str) -> str:
+        return hashlib.sha1(f"{seed}|{time.time()}".encode()).hexdigest()[:12]
+
+    # Ensure members lists are lists
+    for cid, data in cluster_index.items():
+        if not isinstance(data.get("members"), list):
+            data["members"] = list(data.get("members") or [])
+        if "postings" not in data:
+            data["postings"] = []
+
+    # 1) Create new clusters
+    for c in payload.creates:
+        if not c.members:
+            continue
+        cid = _new_cid("|".join(sorted(c.members)))
+        cluster_index[cid] = {"label": c.label or c.members[0], "members": list(dict.fromkeys(c.members)), "postings": []}
+        for ident in c.members:
+            id_to_cluster[ident] = cid
+        _recompute_cluster_postings(cluster_index, identifier_postings, cid)
+
+    # 2) Move identifiers
+    for m in payload.moves:
+        ident = m.identifier
+        if ident not in id_to_cluster:
+            continue
+        dst = m.target_cluster_id
+        if dst not in cluster_index:
+            dst = _new_cid(ident)
+            cluster_index[dst] = {"label": ident, "members": [], "postings": []}
+        src = id_to_cluster[ident]
+        if src == dst:
+            continue
+        # remove from src
+        try:
+            if ident in cluster_index[src]["members"]:
+                cluster_index[src]["members"].remove(ident)
+        except Exception:
+            pass
+        # add to dst
+        if ident not in cluster_index[dst]["members"]:
+            cluster_index[dst]["members"].append(ident)
+        id_to_cluster[ident] = dst
+        _recompute_cluster_postings(cluster_index, identifier_postings, src)
+        _recompute_cluster_postings(cluster_index, identifier_postings, dst)
+
+    # 3) Relabel (“gold name”)
+    for r in payload.relabels:
+        if r.cluster_id in cluster_index and r.label:
+            cluster_index[r.cluster_id]["label"] = r.label
+
+    # Drop empty clusters
+    to_delete = [cid for cid, data in cluster_index.items() if not data.get("members")]
+    for cid in to_delete:
+        cluster_index.pop(cid, None)
+
+    _save_cluster_artifacts(job_id, cluster_index, id_to_cluster)
+    return {"ok": True}
 
 
 @app.get("/index/cluster", response_class=JSONResponse)

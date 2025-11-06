@@ -37,7 +37,7 @@ class MboxIndex:
         mbox_paths: Union[str, Path, Iterable[Union[str, Path]]],
         *,  # The rest are defaulted, so need explicit calling by keyword
         model_path: Union[str, Path] = "name_cluster.model",
-        threshold: float = 0.65,
+        threshold: float = 0.95,
         tika_url: str = "http://localhost:9998",
         spacy_model: str = "en_core_web_trf",
     ) -> None:
@@ -288,7 +288,7 @@ def run_index_to_dir(
     out_dir: Path | str,
     *,
     model_path: str | Path = "name_cluster.model",
-    threshold: float = 0.65,
+    threshold: float = 0.95,
     tika_url: str = "http://localhost:9998",
     spacy_model: str = "en_core_web_trf",
 ) -> dict:
@@ -321,6 +321,10 @@ def run_index_to_dir(
     )
     (out / "id_to_cluster.json").write_text(
         json.dumps(idx.id_to_cluster, indent=2), encoding="utf-8"
+    )
+    # Persist per-identifier postings so edits can recompute cluster postings later
+    (out / "identifier_postings.json").write_text(
+        json.dumps(idx.postings, indent=2), encoding="utf-8"
     )
 
     # Write a compact parts file for UI rendering
