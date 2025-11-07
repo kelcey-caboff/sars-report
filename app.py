@@ -1,5 +1,5 @@
 from fastapi import FastAPI, File, UploadFile, HTTPException, Request, BackgroundTasks, Query
-from fastapi.responses import PlainTextResponse, JSONResponse, HTMLResponse, RedirectResponse
+from fastapi.responses import JSONResponse, HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from fastapi.middleware.cors import CORSMiddleware
@@ -15,6 +15,10 @@ import re
 from email.utils import parsedate_to_datetime
 from pydantic import BaseModel, Field
 
+from contextlib import asynccontextmanager
+import shutil
+
+
 TIKA_URL = "http://localhost:9998/"
 DATA_DIR = Path(os.getenv("DATA_DIR", "data"))
 DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -22,7 +26,18 @@ DATA_DIR.mkdir(parents=True, exist_ok=True)
 INDEX_JOBS_DIR = DATA_DIR / "index_jobs"
 INDEX_JOBS_DIR.mkdir(parents=True, exist_ok=True)
 
-app = FastAPI(title="Bare-bones SARs Sifter", version="0.1.0")
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    print("startup")
+    # Maybe create the folder if needed
+    DATA_DIR.mkdir(exist_ok=True)
+    yield
+    print("shutdown → cleaning")
+    shutil.rmtree(DATA_DIR, ignore_errors=True)
+
+
+app = FastAPI(title="Bare-bones SARs Sifter", version="0.1.0", lifespan=lifespan)
 app.mount("/static", StaticFiles(directory="static"), name="static")
 templates = Jinja2Templates(directory="templates")
 
@@ -40,6 +55,7 @@ CHUNK_SIZE = 1024 * 1024  # 1 MiB
 
 _uuid_re = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
 _ext_re = re.compile(r"\.[a-z0-9]{1,8}$")
+
 
 def _safe_ext(ext: str) -> str:
     try:

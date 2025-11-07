@@ -10,6 +10,8 @@ from collections import defaultdict, deque
 import joblib
 from sklearn.linear_model import LogisticRegression
 from nameparser import HumanName
+from email.utils import parseaddr, getaddresses
+
 
 EMAIL_RX = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
@@ -320,8 +322,7 @@ class IdentityClusteringModel:
         # Score & build graph
         adj: Dict[int, List[int]] = defaultdict(list)
 
-        # Force-link "Display Name <email@domain>" to its components
-        header_rx = re.compile(r'^\s*(.*?)\s*<\s*([^>]+)\s*>\s*$')
+        # Safely force-link only simple single-address forms: "Name <email>"
         expanded: List[str] = []
         seen_vals: Dict[str, int] = {}
         forced_edges: List[Tuple[int, int]] = []
@@ -333,15 +334,31 @@ class IdentityClusteringModel:
             return seen_vals[val]
 
         for s in strings:
-            m = header_rx.match(s)
-            if m:
-                disp = m.group(1).strip()
-                email = m.group(2).strip()
-                i = add_item(disp)
-                j = add_item(email)
-                forced_edges.append((i, j))   # guarantee they’re linked
-            else:
-                add_item(s)
+            # Detect a *single* address of the form Name <email>, avoiding comma-separated lists
+            if ('<' in s and '>' in s) and (',' not in s) and (';' not in s):
+                disp, email = parseaddr(s)
+                email = (email or '').strip()
+                disp = (disp or '').strip()
+
+                # If the display name accidentally captured the header label (e.g., "To: Guido van Rossum"), strip it
+                if disp:
+                    disp = re.sub(r'^\s*(?:to|from|cc|bcc)\s*:\s*', '', disp, flags=re.IGNORECASE).strip()
+
+                # If parseaddr gave no display name but this looks like a header line, try to grab the name between the label and '<'
+                if not disp:
+                    m_hdr = re.match(r'^\s*(?:to|from|cc|bcc)\s*:\s*(.*?)\s*<', s, flags=re.IGNORECASE)
+                    if m_hdr:
+                        disp = m_hdr.group(1).strip()
+
+                if email:
+                    j = add_item(email)
+                    if disp:
+                        i = add_item(disp)
+                        forced_edges.append((i, j))  # guarantee link between display name and email
+                    # If no display name, we still add the email node above
+                    continue  # handled
+            # Fallback: keep the original token as-is
+            add_item(s)
 
         strings = expanded
 

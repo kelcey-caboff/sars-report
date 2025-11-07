@@ -5,12 +5,16 @@
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>Bare-bones SARs Sifter</title>
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bulma@0.9.4/css/bulma.min.css">
-  <link rel="stylesheet" href="/static/style.css">
+  <link rel="stylesheet" href="/static/css/style.css">
+  <script src="https://cdn.jsdelivr.net/npm/sortablejs@1.15.2/Sortable.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/sortablejs@1.15.2/plugins/SortableMultiDrag.min.js"></script>
+  <script src="/static/js/identifier_editor.js" defer></script>
+  <script src="/static/js/file_handler.js" defer></script>
 </head>
 <body class="section">
   <div class="container">
-    <h1 class="title">Bare-bones SARs Sifter</h1>
-    <p class="subtitle">Upload a file → get text & metadata</p>
+    <h1 class="title">SARs Report</h1>
+    <p class="subtitle">Upload .mbox files → sift the results using identities.</p>
 
     <form id="uploadForm" class="box">
       <div class="field">
@@ -57,27 +61,52 @@
       <p id="indexStatus" class="help">Idle.</p>
     </div>
 
-    <details id="id-editor" open>
-      <summary><strong>Identifier &amp; Cluster Editor</strong> (click to fold)</summary>
+    <div id="indexing" class="box">
+      <details id="id-editor" open>
+        <summary><strong>Identifier &amp; Cluster Editor</strong> (click to fold)</summary>
 
-      <div style="margin: 1rem 0;">
-        <label>Job ID:
-          <input id="jobIdInput" placeholder="paste job_id…" style="min-width: 28rem;">
-        </label>
-        <button class="button" id="loadBtn">Load</button>
-        <button class="button" id="saveBtn" disabled>Save Changes</button>
-      </div>
+        <!-- <div style="margin: 1rem 0;"> -->
+        <div class="content mt-2">
+          <div class="field">
+            <p class="control">
+              <label class="label is-small">Job ID</label>
+              <input class="input is-small" id="jobIdInput" placeholder="paste job_id…" >
+            </p>
+            
+          </div>
+          <div class="field">
+            <p class="control">
+              <button class="button is-small is-link" id="loadBtn">Load</button>
+              <button class="button is-small is-primary" id="saveBtn" disabled>Save Changes</button>
+            </p>
+          </div>
+        </div>
 
-      <div class="field is-grouped" style="margin-bottom: .75rem;">
-        <div class="control">
-          <button class="button is-small" id="addBucketBtn">+ Add bucket</button>
+        <div class="field is-grouped" style="margin-bottom:.75rem; align-items:center; gap:.5rem;">
+          <div class="control" style="flex:1;">
+            <input id="idFilter" class="input is-small" type="search" placeholder="Filter identifiers (type to narrow)…">
+          </div>
+          <div class="control">
+            <button class="button is-small" id="addBucketBtn">+ New bucket</button>
+          </div>
+          <div class="control">
+            <button class="button is-small" id="undoBtn" title="Undo last change">Undo</button>
+          </div>
+          <div class="control">
+            <span class="tag is-light is-size-7">Drag between buckets. First item = gold name.</span>
+          </div>
         </div>
-        <div class="control">
-          <span class="tag is-light is-size-7">Tip: drag items between buckets; first item becomes the gold name</span>
-        </div>
-      </div>
-      <div id="editorBucketsWrap" style="max-height: 55vh; overflow: auto; border: 1px solid #ddd; padding: .5rem;"></div>
-    </details>
+        <div id="editorBucketsWrap" style="max-height:55vh; overflow:auto; border:1px solid #ddd; padding:.5rem;"></div>
+        <section class="box" id="reviewPanel" style="display:none; margin-top:.75rem;">
+          <h3 class="title is-6">Changes</h3>
+          <pre id="diffBox" style="white-space:pre-wrap; max-height:35vh; overflow:auto; margin-bottom:.5rem;"></pre>
+          <div class="buttons">
+            <button class="button" id="closeReview">Close</button>
+            <button class="button is-primary" id="confirmSave">Confirm Save</button>
+          </div>
+        </section>
+      </details>
+    </div>
 
     <div id="clustersBox" class="box" style="display:none;">
       <h2 class="title is-5">Identity clusters</h2>
@@ -92,456 +121,5 @@
     </div>
   </div>
 
-<script>
-(() => {
-  // State
-  const state = {
-    rows: [],            // [{identifier, cluster_id, is_gold}]
-    clusters: [],        // [{id,label,size}]
-    moves: [],           // computed at save
-    relabels: [],        // computed at save
-    buckets: [],         // [{id, label, items:[ident]}] UI model
-    originalMap: {},     // {ident -> cluster_id}
-  };
-
-  // Helpers
-  const byId = id => document.getElementById(id);
-  const jobIdInput = byId('jobIdInput');
-  const saveBtn = byId('saveBtn');
-  const wrap = byId('editorBucketsWrap');
-  const addBucketBtn = byId('addBucketBtn');
-
-  function makeBucketsFromData() {
-    // Build map cid -> {id,label,items}
-    const map = new Map();
-    const labels = new Map(state.clusters.map(c => [c.id, c.label || '']));
-    for (const r of state.rows) {
-      if (!map.has(r.cluster_id)) {
-        map.set(r.cluster_id, { id: r.cluster_id, label: labels.get(r.cluster_id) || '', items: [] });
-      }
-      map.get(r.cluster_id).items.push(r.identifier);
-      state.originalMap[r.identifier] = r.cluster_id;
-    }
-    state.buckets = Array.from(map.values());
-    // Put the current label (gold) first if present among members
-    for (const b of state.buckets) {
-      if (b.label) {
-        const idx = b.items.indexOf(b.label);
-        if (idx > 0) {
-          b.items.splice(0, 0, ...b.items.splice(idx, 1));
-        }
-      }
-    }
-    // Sort buckets by label for stability
-    state.buckets.sort((a,b) => (a.label || '').localeCompare(b.label || ''));
-  }
-
-  function render() {
-    if (!state.buckets.length) {
-      wrap.innerHTML = '<em>No identifiers loaded.</em>';
-      saveBtn.disabled = true;
-      return;
-    }
-    // Build columns
-    const cols = state.buckets.map(b => {
-      const itemsHtml = b.items.map((ident, idx) => `
-        <li class="bucket-item" draggable="true" data-ident="${ident}">
-          <span class="icon is-small" title="${idx===0 ? 'Gold (cluster label)' : 'Member'}">${idx===0 ? '★' : '&nbsp;'}</span>
-          <span class="ident-text">${ident}</span>
-          <span class="controls">
-            <button class="button is-small is-light move-up" title="Move up" data-ident="${ident}">▲</button>
-            <button class="button is-small is-light move-down" title="Move down" data-ident="${ident}">▼</button>
-          </span>
-        </li>
-      `).join('');
-      return `
-        <div class="bucket" data-cid="${b.id}" style="min-width: 260px; max-width: 320px; margin: .25rem; border: 1px solid #ddd; border-radius: 4px;">
-          <div class="bucket-head" style="display:flex; align-items:center; gap:.5rem; padding:.25rem .5rem; background:#fafafa; border-bottom:1px solid #eee;">
-            <input class="input is-small bucket-label" data-cid="${b.id}" value="${b.label || ''}" placeholder="${b.id.slice(0,6)} label (optional)" style="flex:1;">
-            <button class="button is-small is-light del-bucket" data-cid="${b.id}" title="Delete bucket">🗑</button>
-          </div>
-          <ul class="bucket-list" data-cid="${b.id}" style="list-style:none; margin:0; padding:.25rem; min-height: 2rem;">
-            ${itemsHtml}
-          </ul>
-        </div>
-      `;
-    }).join('');
-
-    wrap.innerHTML = `<div style="display:flex; flex-wrap:wrap;">${cols}</div>`;
-    saveBtn.disabled = false;
-  }
-
-  // Drag & drop
-  let dragState = null;
-
-  function setupDnD() {
-    wrap.querySelectorAll('.bucket-item').forEach(el => {
-      el.addEventListener('dragstart', e => {
-        const ident = el.dataset.ident;
-        const srcList = el.closest('.bucket-list');
-        dragState = { ident, srcCid: srcList.dataset.cid };
-        e.dataTransfer.setData('text/plain', ident);
-      });
-      el.addEventListener('dragend', () => { dragState = null; });
-    });
-
-    wrap.querySelectorAll('.bucket-list').forEach(list => {
-      list.addEventListener('dragover', e => { e.preventDefault(); e.dataTransfer.dropEffect = 'move'; });
-      list.addEventListener('drop', e => {
-        e.preventDefault();
-        const ident = e.dataTransfer.getData('text/plain');
-        if (!ident) return;
-        const dstCid = list.dataset.cid;
-        moveIdentToBucket(ident, dstCid);
-      });
-    });
-  }
-
-  function moveIdentToBucket(ident, dstCid) {
-    // remove from any bucket
-    for (const b of state.buckets) {
-      const idx = b.items.indexOf(ident);
-      if (idx >= 0) {
-        b.items.splice(idx, 1);
-      }
-    }
-    // add to destination at end
-    const dst = state.buckets.find(b => b.id === dstCid);
-    if (dst) dst.items.push(ident);
-    render();
-    setupHandlers();
-  }
-
-  function setupButtons() {
-    wrap.querySelectorAll('.move-up').forEach(btn => {
-      btn.addEventListener('click', () => {
-        const ident = btn.dataset.ident;
-        const b = state.buckets.find(b => b.items.includes(ident));
-        if (!b) return;
-        const i = b.items.indexOf(ident);
-        if (i > 0) { [b.items[i-1], b.items[i]] = [b.items[i], b.items[i-1]]; render(); setupHandlers(); }
-      });
-    });
-    wrap.querySelectorAll('.move-down').forEach(btn => {
-      btn.addEventListener('click', () => {
-        const ident = btn.dataset.ident;
-        const b = state.buckets.find(b => b.items.includes(ident));
-        if (!b) return;
-        const i = b.items.indexOf(ident);
-        if (i >= 0 && i < b.items.length - 1) { [b.items[i+1], b.items[i]] = [b.items[i], b.items[i+1]]; render(); setupHandlers(); }
-      });
-    });
-    wrap.querySelectorAll('.del-bucket').forEach(btn => {
-      btn.addEventListener('click', () => {
-        const cid = btn.dataset.cid;
-        const idx = state.buckets.findIndex(b => b.id === cid);
-        if (idx >= 0) {
-          // move members to next bucket (or first) to avoid loss
-          const members = state.buckets[idx].items.slice();
-          state.buckets.splice(idx,1);
-          if (members.length) {
-            const target = state.buckets[0] || createNewBucket();
-            target.items.push(...members);
-          }
-          render(); setupHandlers();
-        }
-      });
-    });
-    wrap.querySelectorAll('.bucket-label').forEach(inp => {
-      inp.addEventListener('input', () => {
-        const cid = inp.dataset.cid;
-        const b = state.buckets.find(b => b.id === cid);
-        if (b) b.label = inp.value;
-      });
-    });
-  }
-
-  function setupHandlers() {
-    setupDnD();
-    setupButtons();
-  }
-
-  function createNewBucket() {
-    const id = `new-${Date.now()}-${Math.random().toString(36).slice(2,7)}`;
-    const b = { id, label: '', items: [] };
-    state.buckets.push(b);
-    return b;
-  }
-
-  addBucketBtn.addEventListener('click', () => {
-    createNewBucket();
-    render();
-    setupHandlers();
-  });
-
-  async function load(jobId) {
-    currentJobId = jobId;
-    if (jobIdInput) jobIdInput.value = jobId;
-    const res = await fetch(`/index/identifiers?job_id=${encodeURIComponent(jobId)}`);
-    if (!res.ok) throw new Error('Failed to load identifiers');
-    const data = await res.json();
-    state.rows = data.identifiers;
-    state.clusters = data.clusters;
-    state.moves = [];
-    state.relabels = [];
-    state.originalMap = {};
-    makeBucketsFromData();
-    render();
-    setupHandlers();
-    try { await loadClusters(jobId); } catch (e) {}
-  }
-
-  // Save -> compute moves, relabels, creates
-  async function doSave() {
-    const jobId = jobIdInput.value.trim();
-    if (!jobId) { alert('Provide a job_id first.'); return; }
-
-    const creates = [];
-    const moves = [];
-    const relabels = [];
-
-    // map identifier -> new cid
-    const newMap = {};
-    for (const b of state.buckets) {
-      for (const ident of b.items) newMap[ident] = b.id;
-    }
-
-    // new buckets
-    const newBuckets = state.buckets.filter(b => b.id.startsWith('new-'));
-    for (const b of newBuckets) {
-      if (!b.items.length) continue;
-      creates.push({ label: b.items[0], members: b.items.slice() });
-    }
-
-    // moves (existing identifiers whose cluster changed or moved into newly created clusters)
-    for (const [ident, oldCid] of Object.entries(state.originalMap)) {
-      const newCid = newMap[ident];
-      if (!newCid) continue;
-      if (newCid !== oldCid) {
-        moves.push({ identifier: ident, target_cluster_id: newCid });
-      }
-    }
-
-    // relabels: for each bucket (existing and new), set label = first item (gold)
-    for (const b of state.buckets) {
-      if (!b.items.length) continue;
-      if (!b.id.startsWith('new-')) {
-        relabels.push({ cluster_id: b.id, label: b.items[0] });
-      }
-    }
-
-    const body = { job_id: jobId, moves, relabels, creates };
-    const res = await fetch('/index/clusters/update', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body)
-    });
-    if (!res.ok) {
-      const t = await res.text().catch(()=> ''); alert(`Update failed: ${res.status} ${t}`); return;
-    }
-    await load(jobId); // reload fresh
-  }
-
-  // Wire buttons
-  byId('loadBtn').addEventListener('click', () => {
-    const jobId = jobIdInput.value.trim(); if (jobId) load(jobId).catch(err=>alert(err.message));
-  });
-  byId('saveBtn').addEventListener('click', () => { doSave().catch(err => alert(err.message)); });
-
-  // expose for other scripts
-  window.loadIdentifiers = load;
-})();
-</script>
-
-<script>
-const fileInput = document.getElementById('fileInput');
-const fileName  = document.getElementById('fileName');
-const form      = document.getElementById('uploadForm');
-const statusEl  = document.getElementById('status');
-const results   = document.getElementById('results');
-const resetBtn  = document.getElementById('resetBtn');
-const jobIdInput = document.getElementById('jobIdInput');
-
-function escapeHtml(s) {
-  if (s == null) return '';
-  return String(s)
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&#39;');
-}
-
-fileInput.addEventListener('change', () => {
-  if (!fileInput.files.length) {
-    fileName.textContent = 'No files selected';
-  } else if (fileInput.files.length === 1) {
-    fileName.textContent = fileInput.files[0].name;
-  } else {
-    fileName.textContent = `${fileInput.files.length} files selected`;
-  }
-});
-
-resetBtn.addEventListener('click', () => {
-  form.reset();
-  fileName.textContent = 'No files selected';
-  statusEl.textContent = '';
-  results.classList.add('is-hidden');
-});
-
-form.addEventListener('submit', async (e) => {
-  e.preventDefault();
-  if (!fileInput.files.length) return;
-  results.classList.add('is-hidden');
-  statusEl.textContent = 'Uploading…';
-
-  const fd = new FormData();
-  for (const f of fileInput.files) {
-    fd.append('files', f);
-  }
-
-  try {
-    const up = await fetch('/upload', { method: 'POST', body: fd });
-    if (!up.ok) {
-      const errText = await up.text();
-      throw new Error(`Upload failed: ${up.status} ${errText}`);
-    }
-    //const data = await up.json();
-
-
-    statusEl.textContent = 'Done.';
-    window.location = '/';
-
-    results.classList.remove('is-hidden');
-  } catch (err) {
-    statusEl.textContent = err.message || String(err);
-    window.location = '/';
-  }
-});
-
-const startIndexBtn = document.getElementById('startIndexBtn');
-const indexStatus  = document.getElementById('indexStatus');
-let pollTimer = null;
-
-const clustersBox = document.getElementById('clustersBox');
-const clusterSelect = document.getElementById('clusterSelect');
-const clusterResults = document.getElementById('clusterResults');
-let currentJobId = null;
-let clustersCache = [];
-
-async function pollStatus(jobId) {
-  try {
-    const res = await fetch(`/index/status?job_id=${encodeURIComponent(jobId)}`);
-    if (!res.ok) {
-      indexStatus.textContent = `Status check failed: ${res.status}`;
-      clearInterval(pollTimer);
-      startIndexBtn.disabled = false;
-      return;
-    }
-    const data = await res.json();
-    if (data.status === 'running') {
-      const p = data.progress || { processed: 0, total: 0 };
-      indexStatus.textContent = `Indexing… ${p.processed}/${p.total}`;
-    } else if (data.status === 'done') {
-      const p = data.progress || { processed: 0, total: 0 };
-      indexStatus.textContent = `Indexing complete. Processed ${p.processed} file(s).`;
-      clearInterval(pollTimer);
-      startIndexBtn.disabled = false;
-      currentJobId = jobId;
-      if (jobIdInput) jobIdInput.value = jobId;
-      try { await window.loadIdentifiers(jobId); } catch (e) {}
-      loadClusters(jobId);
-    } else if (data.status === 'error') {
-      indexStatus.textContent = `Indexing error: ${data.error || 'Unknown error'}`;
-      clearInterval(pollTimer);
-      startIndexBtn.disabled = false;
-    } else {
-      indexStatus.textContent = `Status: ${data.status}`;
-    }
-  } catch (e) {
-    indexStatus.textContent = `Status error: ${e.message || e}`;
-    clearInterval(pollTimer);
-    startIndexBtn.disabled = false;
-  }
-}
-
-startIndexBtn?.addEventListener('click', async () => {
-  startIndexBtn.disabled = true;
-  indexStatus.textContent = 'Starting…';
-  try {
-    const res = await fetch('/index/start', { method: 'POST' });
-    if (!res.ok) {
-      const t = await res.text();
-      throw new Error(`Start failed: ${res.status} ${t}`);
-    }
-    const data = await res.json();
-    const jobId = data.job_id;
-    indexStatus.textContent = `Job ${jobId} started…`;
-    if (pollTimer) clearInterval(pollTimer);
-    pollTimer = setInterval(() => pollStatus(jobId), 500);
-  } catch (e) {
-    indexStatus.textContent = e.message || String(e);
-    startIndexBtn.disabled = false;
-  }
-});
-
-async function loadClusters(jobId) {
-  try {
-    const res = await fetch(`/index/result?job_id=${encodeURIComponent(jobId)}`);
-    if (!res.ok) return;
-    const data = await res.json();
-    const clusters = data.clusters || [];
-    if (!clusters.length) return;
-    clustersCache = clusters;
-    clustersBox.style.display = '';
-    clusterSelect.innerHTML = '';
-    for (const c of clusters) {
-      const opt = document.createElement('option');
-      const count = Number.isFinite(c.size)
-        ? c.size
-        : (Array.isArray(c.members) ? c.members.length : 0);
-      opt.value = c.id;
-      opt.textContent = `${c.label || c.id}`;
-      clusterSelect.appendChild(opt);
-    }
-    if (clusterSelect.value) {
-      showCluster(jobId, clusterSelect.value);
-    }
-  } catch (e) {
-    console.error(e);
-  }
-}
-
-async function showCluster(jobId, clusterId) {
-  if (!clusterId) return;
-  const res = await fetch(`/index/cluster?job_id=${encodeURIComponent(jobId)}&cluster_id=${encodeURIComponent(clusterId)}`);
-  if (!res.ok) {
-    clusterResults.textContent = 'Failed to load cluster.';
-    return;
-  }
-  const data = await res.json();
-  const posts = data.postings || [];
-  const frag = document.createDocumentFragment();
-  for (const p of posts) {
-    const box = document.createElement('div');
-    box.className = 'box';
-    const from = p.from || '';
-    const to = p.to || '';
-    const subj = p.subject || '(no subject)';
-    const date = p.date || '';
-    const body = p.body || '';
-    box.innerHTML = `
-      <p><strong>FROM:</strong> ${escapeHtml(from)}</p>
-      <p><strong>TO:</strong> ${escapeHtml(to)}</p>
-      <p><strong>SUBJECT:</strong> ${escapeHtml(subj)}</p>
-      <p><strong>DATE:</strong> ${escapeHtml(date)}</p>
-      <div class="content"><pre>${escapeHtml(body)}</pre></div>
-    `;
-    frag.appendChild(box);
-  }
-  clusterResults.innerHTML = '';
-  clusterResults.appendChild(frag);
-}
-
-clusterSelect?.addEventListener('change', () => showCluster(currentJobId, clusterSelect.value));
-</script>
 </body>
 </html>

@@ -119,6 +119,8 @@ class MboxIndex:
             self._add_identifier(name, part_id, role)
         if email:
             self._add_identifier(email, part_id, role)
+        if name and email:
+            self._add_identifier(f"{name} <{email}>", part_id, role)
 
     def debug_cluster_postings(self, cluster_id: str) -> Dict[str, int]:
         """Return a count of postings per member identifier for this cluster."""
@@ -166,6 +168,8 @@ class MboxIndex:
                             self._add_identifier(name, part_id, "recipient")
                         if email:
                             self._add_identifier(email, part_id, "recipient")
+                        if name and email:
+                            self._add_identifier(f"{name} <{email}>", part_id, "recipient")
 
             # Body: keep as-is for now
             body_text = doc.get("body", "") or ""
