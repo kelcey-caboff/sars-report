@@ -649,7 +649,7 @@ async def index_search(payload: FinderPayload):
                         continue
                     if role == "from":
                         from_set.add(pid)
-                    elif role in ("to", "cc", "bcc"):
+                    elif role in ("to", "cc", "bcc", "recipient", "recipients"):
                         to_set.add(pid)
                     elif role == "body":
                         body_set.add(pid)
