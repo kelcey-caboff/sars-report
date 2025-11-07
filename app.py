@@ -315,6 +315,7 @@ async def index_identifiers(job_id: str = Query(...)):
     return {"identifiers": rows, "clusters": clusters}
 
 
+
 class MoveModel(BaseModel):
     identifier: str
     target_cluster_id: str  # if unknown, a new cluster will be created
@@ -335,6 +336,17 @@ class ClusterUpdate(BaseModel):
     moves: list[MoveModel] = Field(default_factory=list)
     relabels: list[RelabelModel] = Field(default_factory=list)
     creates: list[CreateModel] = Field(default_factory=list)
+
+# ======== Finder Models ========
+class FinderRule(BaseModel):
+    cluster_id: str
+    from_: str = Field(default="any", alias="from")
+    to: str = Field(default="any")
+    body: str = Field(default="any")
+
+class FinderPayload(BaseModel):
+    job_id: str
+    rules: list[FinderRule] = Field(default_factory=list)
 
 
 @app.post("/index/clusters/update", response_class=JSONResponse)
@@ -598,3 +610,129 @@ async def upload(files: List[UploadFile] = File(...)):
 
     # Go back to index, which now lists cumulative uploads by original name
     return RedirectResponse(url="/", status_code=303)
+
+@app.post("/index/search", response_class=JSONResponse)
+async def index_search(payload: FinderPayload):
+    job_id = payload.job_id
+    base = _job_dir(job_id)
+    idx_path = base / "cluster_index.json"
+    parts_path = base / "parts.json"
+    if not idx_path.exists():
+        raise HTTPException(status_code=404, detail="No cluster index for this job")
+
+    # Load artifacts
+    try:
+        cluster_index, id_to_cluster, identifier_postings = _load_cluster_artifacts(job_id)
+    except Exception:
+        raise HTTPException(status_code=500, detail="Could not load cluster artifacts")
+
+    # Load parts
+    try:
+        parts = json.loads(parts_path.read_text(encoding="utf-8")) if parts_path.exists() else {}
+    except Exception:
+        parts = {}
+
+    # Universe of part_ids
+    all_pids = set(parts.keys())
+
+    # Helper: sets for a given cluster id
+    def role_sets_for_cluster(cid: str):
+        members = set(cluster_index.get(cid, {}).get("members", []) or [])
+        from_set, to_set, body_set = set(), set(), set()
+
+        if identifier_postings:
+            for ident in members:
+                for post in identifier_postings.get(ident, []) or []:
+                    pid = post.get("part_id")
+                    role = post.get("role")
+                    if not pid or pid not in all_pids:
+                        continue
+                    if role == "from":
+                        from_set.add(pid)
+                    elif role in ("to", "cc", "bcc"):
+                        to_set.add(pid)
+                    elif role == "body":
+                        body_set.add(pid)
+        else:
+            # Fallback: derive by simple string containment in headers/body
+            # Note: case-insensitive containment on raw strings; may over-match.
+            lowered_members = [m.lower() for m in members]
+            for pid, doc in parts.items():
+                try:
+                    h_from = (doc.get("From") or doc.get("from") or "").lower()
+                    h_to = " ".join([
+                        (doc.get("To") or doc.get("to") or ""),
+                        (doc.get("Cc") or doc.get("cc") or ""),
+                        (doc.get("Bcc") or doc.get("bcc") or ""),
+                    ]).lower()
+                    b = (doc.get("Body") or doc.get("body") or doc.get("text") or "").lower()
+                    if any(m in h_from for m in lowered_members):
+                        from_set.add(pid)
+                    if any(m in h_to for m in lowered_members):
+                        to_set.add(pid)
+                    if any(m in b for m in lowered_members):
+                        body_set.add(pid)
+                except Exception:
+                    continue
+
+        return from_set, to_set, body_set
+
+    # Apply rules with AND semantics across rules and roles
+    candidates = set(all_pids)
+    for rule in payload.rules:
+        if rule.cluster_id not in cluster_index:
+            # Unknown cluster: no matches possible for this rule
+            candidates.clear()
+            break
+        r_from, r_to, r_body = role_sets_for_cluster(rule.cluster_id)
+        local = set(all_pids)
+        if rule.from_ == "yes":
+            local &= r_from
+        elif rule.from_ == "no":
+            local -= r_from
+        # 'any' → no constraint
+
+        if rule.to == "yes":
+            local &= r_to
+        elif rule.to == "no":
+            local -= r_to
+
+        if rule.body == "yes":
+            local &= r_body
+        elif rule.body == "no":
+            local -= r_body
+
+        candidates &= local
+        if not candidates:
+            break
+
+    # Normalize output like /index/cluster
+    def pick(d, *keys):
+        for k in keys:
+            if k in d and d[k] is not None:
+                return d[k]
+        return None
+
+    items = []
+    for pid in candidates:
+        doc = parts.get(pid, {})
+        items.append({
+            "from": pick(doc, "From", "from"),
+            "to": pick(doc, "To", "to"),
+            "subject": pick(doc, "Subject", "subject") or "(no subject)",
+            "date": pick(doc, "Date", "date"),
+            "body": pick(doc, "Body", "body", "text"),
+        })
+
+    def _dt_key(rec):
+        d = rec.get("date")
+        try:
+            if not d:
+                return 0
+            dt = parsedate_to_datetime(d)
+            return int(dt.timestamp()) if dt else 0
+        except Exception:
+            return 0
+
+    items.sort(key=_dt_key)
+    return {"matches": items}

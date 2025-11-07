@@ -108,16 +108,38 @@
       </details>
     </div>
 
-    <div id="clustersBox" class="box" style="display:none;">
-      <h2 class="title is-5">Identity clusters</h2>
-      <div class="field">
-        <div class="control">
-          <div class="select">
-            <select id="clusterSelect"></select>
-          </div>
-        </div>
+
+    <div id="finderBox" class="box" style="display:none;">
+      <h2 class="title is-5">Email Finder</h2>
+      <p class="is-size-7 has-text-grey">Set role conditions per identity, then apply. All conditions are ANDed; “No” means NOT in that role.</p>
+
+      <div class="table-container" style="max-height:45vh; overflow:auto;">
+        <table class="table is-striped is-narrow is-fullwidth" id="finderTable">
+          <thead>
+            <tr>
+              <th>Cluster</th>
+              <th>From</th>
+              <th>To (+Cc/Bcc)</th>
+              <th>Body</th>
+            </tr>
+          </thead>
+          <tbody id="finderTbody">
+            <!-- rows injected by JS -->
+          </tbody>
+        </table>
       </div>
-      <div id="clusterResults" class="content"></div>
+
+      <div class="buttons">
+        <button class="button is-primary" id="finderApplyBtn">Apply filters</button>
+        <button class="button" id="finderClearBtn">Clear</button>
+      </div>
+
+      <div id="finderStatus" class="help"></div>
+
+      <div id="finderResults" class="content" style="display:none; margin-top:.75rem;">
+        <h3 class="title is-6">Matching emails</h3>
+        <div id="finderResultsInner"></div>
+      </div>
     </div>
   </div>
 

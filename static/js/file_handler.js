@@ -67,9 +67,6 @@ const startIndexBtn = document.getElementById('startIndexBtn');
 const indexStatus  = document.getElementById('indexStatus');
 let pollTimer = null;
 
-const clustersBox = document.getElementById('clustersBox');
-const clusterSelect = document.getElementById('clusterSelect');
-const clusterResults = document.getElementById('clusterResults');
 let currentJobId = null;
 let clustersCache = [];
 
@@ -94,7 +91,7 @@ async function pollStatus(jobId) {
       currentJobId = jobId;
       if (jobIdInput) jobIdInput.value = jobId;
       try { await window.loadIdentifiers(jobId); } catch (e) {}
-      loadClusters(jobId);
+      loadFinder(jobId);
     } else if (data.status === 'error') {
       indexStatus.textContent = `Indexing error: ${data.error || 'Unknown error'}`;
       clearInterval(pollTimer);
@@ -129,7 +126,38 @@ startIndexBtn?.addEventListener('click', async () => {
   }
 });
 
-async function loadClusters(jobId) {
+// =========================
+// Email Finder UI & logic
+// =========================
+const finderBox = document.getElementById('finderBox');
+const finderTbody = document.getElementById('finderTbody');
+const finderApplyBtn = document.getElementById('finderApplyBtn');
+const finderClearBtn = document.getElementById('finderClearBtn');
+const finderStatus = document.getElementById('finderStatus');
+const finderResults = document.getElementById('finderResults');
+const finderResultsInner = document.getElementById('finderResultsInner');
+
+function makeTriStateSelect(defaultVal = 'any') {
+  const sel = document.createElement('select');
+  sel.className = 'select is-small';
+  // we wrap select in a div.select for Bulma, but keep it simple here
+  sel.innerHTML = `
+    <option value="any">Any</option>
+    <option value="yes">Yes</option>
+    <option value="no">No</option>
+  `;
+  sel.value = defaultVal;
+  return sel;
+}
+
+function wrapSelect(selectEl) {
+  const wrap = document.createElement('div');
+  wrap.className = 'select is-small';
+  wrap.appendChild(selectEl);
+  return wrap;
+}
+
+async function loadFinder(jobId) {
   try {
     const res = await fetch(`/index/result?job_id=${encodeURIComponent(jobId)}`);
     if (!res.ok) return;
@@ -137,36 +165,61 @@ async function loadClusters(jobId) {
     const clusters = data.clusters || [];
     if (!clusters.length) return;
     clustersCache = clusters;
-    clustersBox.style.display = '';
-    clusterSelect.innerHTML = '';
+
+    // Build rows
+    finderTbody.innerHTML = '';
     for (const c of clusters) {
-      const opt = document.createElement('option');
-      const count = Number.isFinite(c.size)
-        ? c.size
-        : (Array.isArray(c.members) ? c.members.length : 0);
-      opt.value = c.id;
-      opt.textContent = `${c.label || c.id}`;
-      clusterSelect.appendChild(opt);
+      const tr = document.createElement('tr');
+      tr.dataset.cid = c.id;
+
+      const tdName = document.createElement('td');
+      tdName.textContent = c.label || c.id;
+      tr.appendChild(tdName);
+
+      const roles = ['from', 'to', 'body'];
+      for (const role of roles) {
+        const td = document.createElement('td');
+        const sel = makeTriStateSelect('any');
+        sel.dataset.role = role;
+        td.appendChild(wrapSelect(sel));
+        tr.appendChild(td);
+      }
+      finderTbody.appendChild(tr);
     }
-    if (clusterSelect.value) {
-      showCluster(jobId, clusterSelect.value);
-    }
+
+    finderBox.style.display = '';
+    finderStatus.textContent = '';
+    finderResults.style.display = 'none';
   } catch (e) {
     console.error(e);
+    finderStatus.textContent = e.message || String(e);
   }
 }
 
-async function showCluster(jobId, clusterId) {
-  if (!clusterId) return;
-  const res = await fetch(`/index/cluster?job_id=${encodeURIComponent(jobId)}&cluster_id=${encodeURIComponent(clusterId)}`);
-  if (!res.ok) {
-    clusterResults.textContent = 'Failed to load cluster.';
-    return;
+function collectRulesFromTable() {
+  const rules = [];
+  for (const tr of finderTbody.querySelectorAll('tr')) {
+    const cid = tr.dataset.cid;
+    if (!cid) continue;
+    const sels = tr.querySelectorAll('select');
+    const vals = { from: 'any', to: 'any', body: 'any' };
+    sels.forEach(sel => {
+      const role = sel.dataset.role;
+      if (role && (sel.value === 'yes' || sel.value === 'no' || sel.value === 'any')) {
+        vals[role] = sel.value;
+      }
+    });
+    // Only include a rule if at least one role is not 'any'
+    if (vals.from !== 'any' || vals.to !== 'any' || vals.body !== 'any') {
+      rules.push({ cluster_id: cid, from: vals.from, to: vals.to, body: vals.body });
+    }
   }
-  const data = await res.json();
-  const posts = data.postings || [];
+  return rules;
+}
+
+function renderFinderResults(items) {
   const frag = document.createDocumentFragment();
-  for (const p of posts) {
+  for (const p of items) {
     const box = document.createElement('div');
     box.className = 'box';
     const from = p.from || '';
@@ -179,12 +232,60 @@ async function showCluster(jobId, clusterId) {
       <p><strong>TO:</strong> ${escapeHtml(to)}</p>
       <p><strong>SUBJECT:</strong> ${escapeHtml(subj)}</p>
       <p><strong>DATE:</strong> ${escapeHtml(date)}</p>
-      <div class="content"><pre>${escapeHtml(body)}</pre></div>
-    `;
+      <div class="content"><pre>${escapeHtml(body)}</pre></div>`;
     frag.appendChild(box);
   }
-  clusterResults.innerHTML = '';
-  clusterResults.appendChild(frag);
+  finderResultsInner.innerHTML = '';
+  finderResultsInner.appendChild(frag);
 }
 
-clusterSelect?.addEventListener('change', () => showCluster(currentJobId, clusterSelect.value));
+finderApplyBtn?.addEventListener('click', async () => {
+  if (!currentJobId) {
+    finderStatus.textContent = 'No job loaded yet.';
+    return;
+  }
+  const rules = collectRulesFromTable();
+  finderStatus.textContent = '';
+  finderResults.style.display = 'none';
+
+  if (!rules.length) {
+    finderStatus.textContent = 'Select at least one Yes/No to apply filters.';
+    return;
+  }
+
+  try {
+    const res = await fetch('/index/search', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ job_id: currentJobId, rules })
+    });
+    if (!res.ok) {
+      const t = await res.text();
+      throw new Error(`Search failed: ${res.status} ${t}`);
+    }
+    const data = await res.json();
+    const items = data.matches || [];
+    if (!items.length) {
+      finderStatus.textContent = 'No matches found.';
+      finderResults.style.display = 'none';
+      return;
+    }
+    renderFinderResults(items);
+    finderResults.style.display = '';
+  } catch (e) {
+    finderStatus.textContent = e.message || String(e);
+    finderResults.style.display = 'none';
+  }
+});
+
+finderClearBtn?.addEventListener('click', () => {
+  for (const sel of finderTbody.querySelectorAll('select')) {
+    sel.value = 'any';
+  }
+  finderStatus.textContent = '';
+  finderResults.style.display = 'none';
+  finderResultsInner.innerHTML = '';
+});
+
+// Expose for use after indexing completes
+window.loadFinder = loadFinder;
