@@ -137,9 +137,9 @@ const finderStatus = document.getElementById('finderStatus');
 const finderResults = document.getElementById('finderResults');
 const finderResultsInner = document.getElementById('finderResultsInner');
 
+
 function makeTriStateSelect(defaultVal = 'any') {
   const sel = document.createElement('select');
-  sel.className = 'select is-small';
   // we wrap select in a div.select for Bulma, but keep it simple here
   sel.innerHTML = `
     <option value="any">Any</option>
@@ -150,10 +150,31 @@ function makeTriStateSelect(defaultVal = 'any') {
   return sel;
 }
 
+// Helper to update Bulma wrapper styling based on select value
+function updateWrapperState(sel) {
+  const wrap = sel._wrap;
+  if (!wrap) return;
+  // Ensure the native <select> never carries Bulma colour classes
+  sel.classList.remove('is-primary', 'is-danger');
+
+  // Remove previous Bulma modifiers from the wrapper
+  wrap.classList.remove('is-primary', 'is-danger');
+
+  // Apply based on value to the WRAPPER ONLY
+  if (sel.value === 'yes') {
+    wrap.classList.add('is-primary');
+  } else if (sel.value === 'no') {
+    wrap.classList.add('is-danger');
+  }
+}
+
 function wrapSelect(selectEl) {
   const wrap = document.createElement('div');
   wrap.className = 'select is-small';
   wrap.appendChild(selectEl);
+  selectEl._wrap = wrap;
+  updateWrapperState(selectEl);
+  selectEl.addEventListener('change', () => updateWrapperState(selectEl));
   return wrap;
 }
 
@@ -281,6 +302,7 @@ finderApplyBtn?.addEventListener('click', async () => {
 finderClearBtn?.addEventListener('click', () => {
   for (const sel of finderTbody.querySelectorAll('select')) {
     sel.value = 'any';
+    updateWrapperState(sel);
   }
   finderStatus.textContent = '';
   finderResults.style.display = 'none';
