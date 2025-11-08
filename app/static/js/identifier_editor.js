@@ -192,6 +192,9 @@
     history = [];
     render();
     try { await loadClusters(jobId); } catch (e) {}
+    // Make finder appear and point it at the same job
+    if (window.setCurrentJobId) window.setCurrentJobId(jobId);
+    if (window.loadFinder) window.loadFinder(jobId);
   }
 
   function buildPayload() {

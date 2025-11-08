@@ -70,6 +70,9 @@ let pollTimer = null;
 let currentJobId = null;
 let clustersCache = [];
 
+// Allow other modules (r.g. identifier editor) to set the job id used by Finder
+window.setCurrentJobId = (id) => { currentJobId = id; };
+
 async function pollStatus(jobId) {
   try {
     const res = await fetch(`/index/status?job_id=${encodeURIComponent(jobId)}`);
@@ -179,16 +182,38 @@ function wrapSelect(selectEl) {
 }
 
 async function loadFinder(jobId) {
+  // Always show the card so users see status/errors
+  finderBox.style.display = '';
+  finderStatus.textContent = 'Loading clusters…';
+  finderResults.style.display = 'none';
+  finderTbody.innerHTML = '';
+
   try {
-    const res = await fetch(`/index/result?job_id=${encodeURIComponent(jobId)}`);
-    if (!res.ok) return;
+    const res = await fetch(`/index/identifiers?job_id=${encodeURIComponent(jobId)}`);
+    if (!res.ok) {
+      finderStatus.textContent = `Failed to load clusters: ${res.status}`;
+      return;
+    }
+
     const data = await res.json();
-    const clusters = data.clusters || [];
-    if (!clusters.length) return;
+
+    // Accept either an array or a map of clusters, just in case
+    let clusters = data.clusters || [];
+    if (!Array.isArray(clusters) && clusters && typeof clusters === 'object') {
+      clusters = Object.entries(clusters).map(([id, label]) => ({ id, label }));
+    }
+
+    if (!clusters.length) {
+      finderStatus.textContent = 'No clusters found for this job yet. Finish indexing or load identifiers.';
+      return;
+    }
+
     clustersCache = clusters;
 
-    // Build rows
-    finderTbody.innerHTML = '';
+    // Build the table rows
+    const roles = ['from', 'to', 'body'];
+    const frag = document.createDocumentFragment();
+
     for (const c of clusters) {
       const tr = document.createElement('tr');
       tr.dataset.cid = c.id;
@@ -197,7 +222,6 @@ async function loadFinder(jobId) {
       tdName.textContent = c.label || c.id;
       tr.appendChild(tdName);
 
-      const roles = ['from', 'to', 'body'];
       for (const role of roles) {
         const td = document.createElement('td');
         const sel = makeTriStateSelect('any');
@@ -205,12 +229,13 @@ async function loadFinder(jobId) {
         td.appendChild(wrapSelect(sel));
         tr.appendChild(td);
       }
-      finderTbody.appendChild(tr);
+
+      frag.appendChild(tr);
     }
 
-    finderBox.style.display = '';
-    finderStatus.textContent = '';
-    finderResults.style.display = 'none';
+    finderTbody.innerHTML = '';
+    finderTbody.appendChild(frag);
+    finderStatus.textContent = '';  // ready
   } catch (e) {
     console.error(e);
     finderStatus.textContent = e.message || String(e);
