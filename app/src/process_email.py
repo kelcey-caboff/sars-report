@@ -177,7 +177,7 @@ if __name__ == "__main__":
 
     parts = {}
     for msg_bytes in iter_message_bytes(mbox_path):
-        mail_boxes = asyncio.run(run_mbox(msg_bytes, mbox_path, "http://localhost:9998"))
+        mail_boxes = asyncio.run(run_mbox(msg_bytes, mbox_path, "http://sars-tika:9998"))
         for k, v in mail_boxes.items():
             parts[k] = v
 

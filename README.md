@@ -40,21 +40,15 @@ The email finder builds a set of rules and sends them to `POST /index/search`. F
 
 ## Quick start
 
-### 1. Install and run
+### 1. Install and run locally
+
+This project now includes a `docker-compose.yaml` that runs both the app and an Apache Tika instance.
 
 ```bash
-# python  3.10+ recommended
-python -m venv .venv
-source .venv/bin/activate # Windows: .venv\Scripts\activate
-pip install --upgrade pip
-pip install -r requirements.txt
-
-# The process expects an Apache Tika server to be running at http://localhost:9998/
-
-uvicorn app:app --reload --port 8000
+docker-compose up --build
 ```
 
-Open <http://localhost:8000> in your browser.
+Open <http://localhost:8088> in your browser.
 
 ### 2. Upload and index
 

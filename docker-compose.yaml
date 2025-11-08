@@ -1,0 +1,18 @@
+services:
+  sars-tika:
+    image: apache/tika:3.2.0.0
+    container_name: sars-tika
+    ports:
+      - "9998:9998"
+  
+  api:
+    build: ./app
+    container_name: app
+    ports:
+      - "8088:8000"
+    environment:
+      - TIKA_URL=http://sars-tika:9998
+      - DATA_DIR=/app/data
+    volumes:
+      # In order to keep the mbox files in a known HD space
+      - ./app/data:/app/data

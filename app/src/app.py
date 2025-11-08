@@ -19,7 +19,7 @@ from contextlib import asynccontextmanager
 import shutil
 
 
-TIKA_URL = "http://localhost:9998/"
+TIKA_URL = "http://sars-tika:9998/"
 DATA_DIR = Path(os.getenv("DATA_DIR", "data"))
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 

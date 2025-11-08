@@ -11,7 +11,8 @@ from cluster_names import IdentityClusteringModel
 
 EMAIL_RX = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
-_DEF_MODEL = "en_core_web_trf"
+# _DEF_MODEL = "en_core_web_trf"
+_DEF_MODEL = "en_core_web_lg"
 
 
 def _load_nlp(model_name: str):
@@ -38,8 +39,8 @@ class MboxIndex:
         *,  # The rest are defaulted, so need explicit calling by keyword
         model_path: Union[str, Path] = "name_cluster.model",
         threshold: float = 0.95,
-        tika_url: str = "http://localhost:9998",
-        spacy_model: str = "en_core_web_trf",
+        tika_url: str = "http://sars-tika:9998",
+        spacy_model: str = "en_core_web_lg",
     ) -> None:
         # Normalize paths to a list
         if isinstance(mbox_paths, (str, Path)):
@@ -293,8 +294,8 @@ def run_index_to_dir(
     *,
     model_path: str | Path = "name_cluster.model",
     threshold: float = 0.95,
-    tika_url: str = "http://localhost:9998",
-    spacy_model: str = "en_core_web_trf",
+    tika_url: str = "http://sars-tika:9998",
+    spacy_model: str = "en_core_web_lg",
 ) -> dict:
     """
     Build an index from one or more .mbox files and write machine-readable
