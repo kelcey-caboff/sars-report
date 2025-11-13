@@ -13,7 +13,9 @@ from email.message import Message
 from simhasher import simhash_64
 
 
-read_parts = set()
+
+read_parts = {}
+seen_message_ids = set()
 
 
 def _sha256(data):
@@ -121,9 +123,29 @@ async def extract_all_parts(raw, tika_url, client, filename=None):
     message_id = (message_id or "").strip().lower()
     out = []
 
+    # Simhash-based near-duplicate check (Hamming distance <= 3)
+    def is_near_duplicate(current_simhash):
+        for prev_simhash in read_parts.values():
+            if bin(prev_simhash ^ current_simhash).count("1") <= 3:
+                return True
+        return False
+
     async def walk(m, depth):
         ctype = m.get_content_type()
         filename_part = m.get_filename()
+
+        # Extract message-id for this part (if present)
+        part_message_id = decode_maybe(m.get("Message-ID") or m.get("Message-Id") or "")
+        part_message_id = (part_message_id or "").strip().lower()
+        # Use outer message_id for top-level, else inner for attached/rfc822
+        current_message_id = part_message_id or message_id
+        # Track duplicates but do not skip identifier extraction
+        is_duplicate_message = False
+        if current_message_id:
+            if current_message_id in seen_message_ids:
+                is_duplicate_message = True
+            else:
+                seen_message_ids.add(current_message_id)
 
         if m.is_multipart():
             for sub in m.iter_parts():
@@ -142,7 +164,8 @@ async def extract_all_parts(raw, tika_url, client, filename=None):
         part_simhash = simhash_64(plaintext)
         date = dateutil.parser.parse(envelope_date, dayfirst=True)
 
-        if part_hash not in read_parts:
+        # Only skip adding parts when the message is a duplicate, but still allow identifiers to be indexed
+        if not is_duplicate_message and part_hash not in read_parts and not is_near_duplicate(part_simhash):
             out.append({
                 "part_id": str(uuid.uuid4()),
                 "part_hash": f"sha256:{part_hash}",
@@ -158,7 +181,7 @@ async def extract_all_parts(raw, tika_url, client, filename=None):
                 "tika": metadata,
                 "body": plaintext
             })
-        read_parts.add(part_hash)
+            read_parts[part_hash] = part_simhash
 
     await walk(msg, 0)
     return out

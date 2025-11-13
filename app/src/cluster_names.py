@@ -9,6 +9,7 @@ from collections import defaultdict, deque
 
 import joblib
 from sklearn.linear_model import LogisticRegression
+from sklearn.ensemble import RandomForestClassifier
 from nameparser import HumanName
 from email.utils import parseaddr, getaddresses
 
@@ -40,7 +41,8 @@ class IdentityClusteringModel:
     Uses nameparser to improve features and blocking.
     """
     def __init__(self):
-        self.clf = LogisticRegression(max_iter=200, solver="liblinear", class_weight="balanced")
+        # self.clf = LogisticRegression(max_iter=200, solver="liblinear", class_weight="balanced")
+        self.clf = RandomForestClassifier(n_estimators=200, max_depth=12, random_state=231, class_weight='balanced')
         self.is_trained = False
         self._parse_cache: Dict[str, Dict[str, str]] = {}
 
@@ -177,6 +179,53 @@ class IdentityClusteringModel:
         last_in_local = 1.0 if (pa["last"] and (pa["last"] in la or pa["last"] in lb)) else 0.0
         first_in_local = 1.0 if (pa["first"] and (pa["first"] in la or pa["first"] in lb)) else 0.0
 
+        # --- Structured local-part matching to parsed names ---
+        def _local_part_matches_name(local: str, parsed: dict) -> bool:
+            """
+            Returns True if the local part matches the parsed name in a common way.
+            Accepts first.last, firstlast, f.last, firstl, etc.
+            """
+            local = local.lower()
+            first = (parsed.get("first") or "").lower()
+            last = (parsed.get("last") or "").lower()
+            initials = (parsed.get("initials") or "").lower()
+            if not local or not (first or last):
+                return False
+            tokens = re.split(r"[^a-z0-9]+", local)
+            # Match first.last or last.first
+            if len(tokens) == 2:
+                if ((tokens[0] == first and tokens[1] == last) or
+                    (tokens[0] == last and tokens[1] == first)):
+                    return True
+                # initials + last, guarded
+                if first and last and ((tokens[0] == first[0] or tokens[0] == initials) and tokens[1] == last):
+                    return True
+                # first + last initial, guarded
+                if first and last and tokens[0] == first and tokens[1] == last[0]:
+                    return True
+            # Match firstlast, firstl, flast, etc.
+            if first and last:
+                if local == first + last:
+                    return True
+                if local == first + last[0]:
+                    return True
+                if local == first[0] + last:
+                    return True
+            # initials (guard initials non-empty)
+            if initials and local == initials:
+                return True
+            return False
+
+        # Compute local_structure_match: does either local part match either parsed name?
+        local_structure_match = 0.0
+        for local in [la, lb]:
+            for parsed in [pa, pb]:
+                if _local_part_matches_name(local, parsed):
+                    local_structure_match = 1.0
+                    break
+            if local_structure_match:
+                break
+
         return [
             seq_sim,
             tok_sim,
@@ -196,6 +245,7 @@ class IdentityClusteringModel:
             first_in_local,
             a_is_email,
             b_is_email,
+            local_structure_match,
         ]
 
     def _blocking_keys(self, s: str) -> List[str]:
@@ -209,23 +259,78 @@ class IdentityClusteringModel:
             if dom:
                 keys.append(f"dom:{dom}")
 
-            # NEW: derive name-like blockers from email local-part
+            # Derive blockers from local-part structure
             parts = re.split(r"[^a-z0-9]+", local.lower())
             parts = [p for p in parts if p]
-            if parts:
-                first_tok = parts[0]
-                last_tok = parts[-1]
-                if last_tok.isalpha() and len(last_tok) >= 2:
-                    keys.append(f"ln:{last_tok}")
-                    if first_tok and first_tok[0].isalpha():
-                        keys.append(f"lnfi:{last_tok}:{first_tok[0]}")
+            # If local part has two tokens, typical first+last or last+first
+            if len(parts) == 2:
+                # Add structured blockers for both orders
+                keys.append(f"fl:{parts[0]}:{parts[1]}")
+                keys.append(f"fl:{parts[1]}:{parts[0]}")
+                # Add human‑friendly fuzzy blockers for initials + last name
+                # Example: jlm -> j + martinez
+                if parts[0] and parts[1]:
+                    # If either token is a single character (initial), treat it as first initial
+                    if len(parts[0]) == 1:
+                        keys.append(f"initlast:{parts[0]}:{parts[1]}")
+                    if len(parts[1]) == 1:
+                        keys.append(f"initlast:{parts[1]}:{parts[0]}")
+                # Also block by last name
+                if parts[1].isalpha() and len(parts[1]) >= 2:
+                    keys.append(f"ln:{parts[1]}")
+                if parts[0].isalpha() and len(parts[0]) >= 2:
+                    keys.append(f"ln:{parts[0]}")
+                # Fallback: allow matching when email is clearly first.last and name has matching last name
+                # This improves cases like "juan.luis@uni.edu" <-> "Juan Luis Martinez"
+                if parts[1].isalpha() and len(parts[1]) >= 2:
+                    keys.append(f"fallback_ln:{parts[1]}")
+                if parts[0].isalpha() and len(parts[0]) >= 2:
+                    keys.append(f"fallback_ln:{parts[0]}")
+                # Block by first initial + last
+                if parts[0] and parts[1] and parts[0][0].isalpha():
+                    keys.append(f"lnfi:{parts[1]}:{parts[0][0]}")
+                if parts[1] and parts[0] and parts[1][0].isalpha():
+                    keys.append(f"lnfi:{parts[0]}:{parts[1][0]}")
+            elif len(parts) == 1 and parts[0]:
+                # Try to extract first/last from a single-token local part (e.g., firstlast, flast, firstl)
+                local = parts[0]
+                # Heuristics for common real-world formats
+                # Try to split at likely boundary between first and last (e.g., 'johnsmith', 'jsmith', 'johns')
+                # Try last 3, 4, 5 letters as possible last name
+                for k in [5, 4, 3]:
+                    if len(local) > k + 1:
+                        first, last = local[:-k], local[-k:]
+                        keys.append(f"fl:{first}:{last}")
+                        keys.append(f"fl:{last}:{first}")
+                # Also try first letter + rest (fsmith, jdoe, etc)
+                if len(local) > 2:
+                    keys.append(f"fl:{local[0]}:{local[1:]}")
+                    keys.append(f"fl:{local[1:]}:{local[0]}")
+                # As fallback, block by the whole local part
+                keys.append(f"local:{local}")
+
+            # Add general token-based blockers from local part,
+            # stripping digits to allow matches like l.zhao99 <-> Zhao, Li
+            for token in parts:
+                alpha = re.sub(r'[^a-z]+', '', token)
+                if alpha and len(alpha) > 1:
+                    keys.append(f"token:{alpha}")
 
         # Name-based blocks (unchanged, tight)
         if p["last"] and p["first"]:
             keys.append(f"lnfi:{p['last']}:{p['first'][0]}")
+            # Add fuzzy name blocker: first initial + last name
+            keys.append(f"initlast:{p['first'][0]}:{p['last']}")
+            # Provide matching fallback for last name so names connect to emails that only expose last
+            keys.append(f"fallback_ln:{p['last']}")
             g = NICK2GROUP.get(p["first"])
             if g is not None:
                 keys.append(f"lnng:{p['last']}:{g}")  # last name + nickname-group id
+
+        # Add general token-based blockers from parsed name components
+        for token in self._tokens(f"{p['first']} {p['middle']} {p['last']}"):
+            if token.isalpha() and len(token) > 1:
+                keys.append(f"token:{token}")
 
         # Ultra-tight fallback only when no better key exists
         if not keys and n:
@@ -302,6 +407,9 @@ class IdentityClusteringModel:
         """
         threshold = minimum predicted match probability to connect two strings.
         """
+        print("\nClustering inputs:")
+        for s in strings:
+            print("  ", repr(s))
         if not self.is_trained:
             raise RuntimeError("Model not trained. Call fit() or load() first.")
         if not strings:
@@ -372,43 +480,64 @@ class IdentityClusteringModel:
             adj[j_forced].append(i_forced)
 
         for i, j in pairs:
-            p = float(self.clf.predict_proba([self._features(strings[i], strings[j])])[0][1])
-            if p >= threshold:
-                # Minimal guardrail: if last names differ, only allow an edge when emails corroborate strongly
-                pa, pb = self._parse_name(strings[i]), self._parse_name(strings[j])
-                ai, bi = self._is_email(strings[i]), self._is_email(strings[j])
+            s_i, s_j = strings[i], strings[j]
+            p = float(self.clf.predict_proba([self._features(s_i, s_j)])[0][1])
+            if p < threshold:
+                continue
 
-                if not ai and not bi:
-                    gfa = NICK2GROUP.get(pa["first"])
-                    gfb = NICK2GROUP.get(pb["first"])
-                    nickname_ok = (gfa is not None and gfa == gfb)
+            ai, bi = self._is_email(s_i), self._is_email(s_j)
 
-                    last_ok = bool(pa["last"] and pb["last"] and pa["last"] == pb["last"])
-                    first_ok = bool(
-                        (pa["first"] and pb["first"] and pa["first"] == pb["first"]) or
-                        (pa["first"] and pb["first"] and pa["first"][0] == pb["first"][0]) or
-                        nickname_ok
-                    )
+            # --- Case 1: both are emails ---
+            # Be extremely conservative: only merge if they are exactly the same address.
+            if ai and bi:
+                if s_i.strip().lower() != s_j.strip().lower():
+                    continue
 
-                    # If same last name but no compatible first/nickname → do not connect
-                    if not (last_ok and first_ok):
+            # --- Case 2: one email, one name ---
+            elif ai != bi:
+                email = s_i if ai else s_j
+                name = s_j if ai else s_i
+                local, dom = self._split_email(email)
+                parsed = self._parse_name(name)
+                first = (parsed.get("first") or "").lower()
+                last = (parsed.get("last") or "").lower()
+                ok = False
+                local_low = local.lower()
+
+                # Heuristics: last name appears in local part, or simple first/last patterns
+                if last and last in local_low:
+                    ok = True
+                elif first and last and (first + last) == local_low:
+                    ok = True
+                elif first and last and (first[0] + last) == local_low:
+                    ok = True
+                elif first and last and (first + last[0]) == local_low:
+                    ok = True
+
+                if not ok:
+                    continue
+
+            # --- Case 3: both are names ---
+            else:
+                pa, pb = self._parse_name(s_i), self._parse_name(s_j)
+                la, lb = pa.get("last"), pb.get("last")
+                fa, fb = pa.get("first"), pb.get("first")
+
+                # Require a shared last name to merge two pure names
+                if not (la and lb and la == lb):
+                    continue
+
+                # If we have first names, require compatible initials or nickname-group
+                if fa and fb:
+                    fa0, fb0 = fa[0], fb[0]
+                    ga = NICK2GROUP.get(fa, None)
+                    gb = NICK2GROUP.get(fb, None)
+                    if (fa0 != fb0) and not (ga is not None and ga == gb):
                         continue
 
-                last_a, last_b = pa.get("last", ""), pb.get("last", "")
-
-                if (not ai and not bi) and ((last_a != last_b) or (not last_a or not last_b)):
-                    ai, bi = self._is_email(strings[i]), self._is_email(strings[j])
-                    la, da = self._split_email(strings[i]) if ai else ("", "")
-                    lb, db = self._split_email(strings[j]) if bi else ("", "")
-                    same_email = ai and bi and strings[i].strip().lower() == strings[j].strip().lower()
-                    same_domain = bool(da and db and da == db)
-                    local_sim = self._seq_ratio(la, lb) if (la and lb) else 0.0
-                    # Require exact email OR same domain with very similar local parts
-                    if not (same_email or (same_domain and local_sim >= 0.85)):
-                        continue
-
-                adj[i].append(j)
-                adj[j].append(i)
+            # Passed all structural checks: accept edge
+            adj[i].append(j)
+            adj[j].append(i)
 
         # Connected components
         visited, clusters_idx = set(), []
@@ -431,3 +560,54 @@ class IdentityClusteringModel:
 
         clusters = [[strings[i] for i in comp] for comp in clusters_idx]
         return sorted([sorted(c) for c in clusters], key=lambda c: (-len(c), c))
+
+
+if __name__ == "__main__":
+    model = IdentityClusteringModel.load(Path("name_cluster.model"))
+
+    test_data = [
+        "guido.van.rossum@example.org",
+        "Moxie Marlinspike's",
+        "Moxie Marlinspike",
+        "Grace Hopper",
+        "Alan Turing",
+        "Alan Turing <a.turing@example.org>",
+        "Moxie Marlinspike <marlinspike@example.com>",
+        "Donald Knuth <donald.knuth@example.com>",
+        "Guido van Rossum <guido.van.rossum@example.org>",
+        "linus.torvalds@example.com",
+        "a.turing@example.org",
+        "donald.knuth@example.com",
+        "Linus Torvalds",
+        "jvn@example.com",
+        "ada.lovelace@example.org",
+        "Ray Kurzweil <ray.kurzweil@example.org>",
+        "John von Neumann <jvn@example.com>",
+        "Guido van Rossum",
+        "grace.hopper@example.com",
+        "ray.kurzweil@example.org",
+        "Donald Knuth",
+        "Hedy Lamarr",
+        "Hedy Lamarr <hedy.lamarr@example.org>",
+        "Grace Hopper <grace.hopper@example.com>",
+        "hedy.lamarr@example.org",
+        "someone@example.com",
+        "Ada Lovelace <ada.lovelace@example.org>",
+        "Ada Lovelace",
+        "John von Neumann",
+        "Ray Kurzweil",
+        "Linus Torvalds <linus.torvalds@example.com>",
+        "marlinspike@example.com"
+    ]
+
+    clusters = model.cluster(test_data, threshold=0.9)
+    for i, cluster in enumerate(clusters):
+        print(f"Cluster {i+1}:")
+        for item in cluster:
+            print("  ", item)
+
+    print("\n🔍 Raw match score between:")
+    a = "juan.luis@uni.edu"
+    b = "Juan Luis Martinez"
+    score = model.clf.predict_proba([model._features(a, b)])[0][1]
+    print(f"{a} ↔ {b} = {score:.3f}")

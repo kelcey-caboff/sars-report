@@ -312,12 +312,24 @@ def generate_messages(people: list[dict], owners: list[dict], total: int = 50, s
         body_s = rand_body(topic)
         body_s = maybe_add_name_mentions(body_s, people, involved)
 
+        # Randomly decide if this singleton is a reply or forward
+        is_reply = random.random() < 0.2
+        is_forward = not is_reply and random.random() < 0.1
+        if is_reply:
+            subject = "Re: " + rand_subject(topic)
+            body_s = "On some date, someone wrote:\n> Example previous message.\n\n" + body_s
+        elif is_forward:
+            subject = "Fwd: " + rand_subject(topic)
+            body_s = "---------- Forwarded message ---------\nFrom: someone@example.com\nDate: some date\nSubject: forwarded subject\nTo: someone@example.com\n\n" + body_s
+        else:
+            subject = rand_subject(topic)
+
         msg = build_message(
             sender=sender,
             to_list=to_list,
             cc_list=cc_list,
             dt=dt,
-            subject=rand_subject(topic),
+            subject=subject,
             body=body_s,
             attachments=maybe_attachments(force=False),
         )

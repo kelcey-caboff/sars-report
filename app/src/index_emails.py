@@ -38,7 +38,7 @@ class MboxIndex:
         mbox_paths: Union[str, Path, Iterable[Union[str, Path]]],
         *,  # The rest are defaulted, so need explicit calling by keyword
         model_path: Union[str, Path] = "name_cluster.model",
-        threshold: float = 0.95,
+        threshold: float = 0.9,
         tika_url: str = "http://sars-tika:9998",
         spacy_model: str = "en_core_web_lg",
     ) -> None:
@@ -293,7 +293,7 @@ def run_index_to_dir(
     out_dir: Path | str,
     *,
     model_path: str | Path = "name_cluster.model",
-    threshold: float = 0.95,
+    threshold: float = 0.9,
     tika_url: str = "http://sars-tika:9998",
     spacy_model: str = "en_core_web_lg",
 ) -> dict:
